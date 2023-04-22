@@ -6,9 +6,11 @@ import pandas as pd
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
+from torch.optim.lr_scheduler import ExponentialLR
 
-from transformers import BertPreTrainedModel, BertModel
-from transformers import AutoConfig, AutoTokenizer
+from transformers import DistilBertPreTrainedModel, DistilBertModel, AutoConfig, AutoTokenizer
+from transformers import DistilBertModel, DistilBertTokenizer
+
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -53,10 +55,10 @@ def read_dataset(sent):
     return res
 
 
-class BertRegresser(BertPreTrainedModel):
+class BertRegresser(DistilBertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-        self.bert = BertModel(config)
+        self.bert = DistilBertModel(config)
         #The output layer that takes the [CLS] representation and gives an output
         self.cls_layer1 = nn.Linear(config.hidden_size,128)
         self.relu1 = nn.ReLU()
@@ -83,7 +85,8 @@ def train(model, iterator, optimizer):
     Returns: epoch_loss
     '''
     epoch_loss = 0
-    criterion = nn.MSELoss()
+    criterion = nn.L1Loss()
+    scheduler = ExponentialLR(optimizer, gamma=0.9)
     model.train()
     total = 0
     for data in tqdm(iterator):
@@ -102,9 +105,10 @@ def train(model, iterator, optimizer):
         optimizer.step()
         total+=len(data)
         epoch_loss += loss.item()
+    scheduler.step()
     return epoch_loss / total
 
-def evaluate(model, iterator, valid_ds_orig):
+def evaluate(model, iterator):
     '''
     function: Evaluating the model
     Input: model, iterator, pad_id
@@ -126,7 +130,7 @@ def evaluate(model, iterator, valid_ds_orig):
             predictions = predictions.squeeze().cpu().numpy()
             final_pred += list(predictions)
             comp_pred += list(target)
-    return score_function(np.array(final_pred), np.array(comp_pred)), math.sqrt((((np.array(final_pred)-np.array(comp_pred))**2).sum())/len(final_pred))
+    return score_function(np.array(final_pred), np.array(comp_pred)), ((abs(np.array(final_pred)-np.array(comp_pred))).sum())/len(final_pred)
 
 
 
@@ -147,12 +151,12 @@ def run(model, tokenizer, root_dir):
     # Reading dataset and preprocessing it to get it in the desired format
     print("Setting up data.")
     train_data = pd.read_csv(f'{root_dir}/train.csv')
-    train_data = train_data.sample(5000)
-    train_data = train_data.fillna('Not Provided')
+    # train_data = train_data.sample(5000)
+    train_data = train_data.dropna(axis=0)
+    print("Data shape:",train_data.shape)
     train_data['PRODUCT_LENGTH'].clip(upper=5000)
     train_ds = read_dataset(train_data)
     train_ds, valid_ds = train_test_split(train_ds, test_size=0.2, random_state=42)
-    valid_ds_orig = valid_ds
     print("Number of training samples:", len(train_ds))
     # Dataloader
     train_loader = DataLoader(
@@ -170,7 +174,7 @@ def run(model, tokenizer, root_dir):
         num_workers=num_workers)
     
     optimizer = optim.Adam(model.parameters(), lr = learning_rate)
-
+    scheduler = ExponentialLR(optimizer, gamma=0.8)
     model = model.to(device)
 
     N_EPOCHS = num_epoch
@@ -179,17 +183,18 @@ def run(model, tokenizer, root_dir):
         
         #training part
         train_loss = train(model, train_loader, optimizer)
-        print(f'Epoch: {epoch+1:02} | Train Loss: {train_loss:.3f}')
+        print(f'Epoch: {epoch+1:02} | Train Loss: {train_loss:.3f} | LR: {scheduler.get_lr()[0]:.6f}')
         
         # Validation
-        valid_loss, val_mse = evaluate(model, valid_loader, valid_ds_orig)
-        print(f'Val. mse: {val_mse:.2f}\t Val. score: {valid_loss:.2f}%')
+        valid_loss, val_mae = evaluate(model, valid_loader)
+        print(f'Val. mae: {val_mae:.2f}\t Val. score: {valid_loss:.2f}%')
         if(valid_loss>best_acc):
             best_acc = valid_loss
             torch.save(model.state_dict(), f'{base_path}/weights/best_model.pth')
             print("Model saved.")
         if wandb_login:
-            wandb.log({"Training loss": train_loss, "Validation MSE": val_mse, "Validation Score": valid_loss})
+            wandb.log({"Training loss": train_loss, "Validation MAE": val_mae, "Validation Score": valid_loss, "lr": scheduler.get_lr()[0]}, step=epoch)
+        scheduler.step()
 
 
 if __name__ == "__main__":
@@ -197,16 +202,16 @@ if __name__ == "__main__":
     base_path = pathlib.Path().absolute()
 
     # Input of the required hyperparameters
-    BATCH_SIZE = 60
+    BATCH_SIZE = 240
     learning_rate = 0.1
-    model_name = 'bert-base-uncased'
-    device = 'cuda:3'
+    model_name = 'distilbert-base-uncased'
+    device = 'cuda:2'
     wandb_login = True
 
     SEED = 42
     # Since the dataset is simple, 1 epoch is sufficient to finetune.
     num_epoch = 100
-    num_workers = 2
+    num_workers = 16
     # Path to the dataset
     root_dir = f"{base_path}/dataset"
     if not os.path.exists(root_dir):
@@ -215,7 +220,8 @@ if __name__ == "__main__":
     #Loading the pretrained model and tokenizer
     config = AutoConfig.from_pretrained(model_name)
     model = BertRegresser(config=config)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+
     
     if wandb_login:
         # For logging
