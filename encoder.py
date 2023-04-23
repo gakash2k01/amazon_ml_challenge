@@ -78,8 +78,8 @@ def evaluate(model, iterator, train_ds):
             predictions = predictions.cpu().numpy()
             embeddings += list(predictions)
     embedding = pd.DataFrame(embeddings)
-    embedding.to_csv('dataset/embeddings.csv', index = False)
-    train_ds.to_csv('dataset/mini_train.csv', index = False)
+    embedding.to_csv('dataset/embeddings1.csv', index = False)
+    train_ds.to_csv('dataset/mini_train1.csv', index = False)
     
 
 def run(model, tokenizer, root_dir):
@@ -99,7 +99,7 @@ def run(model, tokenizer, root_dir):
     # Reading dataset and preprocessing it to get it in the desired format
     print("Setting up data.")
     train_data = pd.read_csv(f'{root_dir}/train.csv')
-    # train_data = train_data.sample(50000)
+    train_data = train_data.sample(100000)
     train_data = train_data.fillna("Not given")
     print("Data shape:",train_data.shape)
     print("Full scale data with clipping.")
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     # Input of the required hyperparameters
     BATCH_SIZE = 2048
     model_name = 'distilbert-base-uncased'
-    device = 'cuda:0'
+    device = 'cuda:1'
 
     SEED = 42
     num_workers = 16

@@ -1,22 +1,16 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 import pandas as pd
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import ExponentialLR
-
-from transformers import DistilBertPreTrainedModel, DistilBertModel, AutoConfig, AutoTokenizer
-from transformers import DistilBertModel, DistilBertTokenizer
-
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import wandb
-import pathlib, os, math
+import pathlib, os
 import warnings
+from sklearn.preprocessing import OneHotEncoder
 from torch.utils.data import Dataset
 from lion_pytorch import Lion
 from utils.score import score_function
@@ -37,33 +31,43 @@ def seed_everything(seed):
 class Decoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.ff0 = nn.Linear(769,128)
-        self.ff1 = nn.Linear(128,16)
-        self.ff2 = nn.Linear(16, 1)
+        self.ff0 = nn.Linear(14189,3000)
+        self.ff1 = nn.Linear(3000,600)
+        self.ff2 = nn.Linear(600, 120)
+        self.ff3 = nn.Linear(120, 24)
+        self.ff4 = nn.Linear(24, 1)
         self.relu = nn.ReLU()
         
 
-    def forward(self, X):
-        output = self.ff0(X)
+    def forward(self, X, X1):
+        X2 = torch.cat((X, X1), dim=1)
+        X2 = X2.to(self.ff0.weight.dtype)
+        output = self.ff0(X2)
         output = self.relu(output)
         output = self.ff1(output)
         output = self.relu(output)
         output = self.ff2(output)
+        output = self.relu(output)
+        output = self.ff3(output)
+        output = self.relu(output)
+        output = self.ff4(output)
         return output
 
 class CustomDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = X
-        self.y = y
+    def __init__(self, data, data1, label):
+        self.data = data
+        self.data1 = data1
+        self.label = label
 
     def __len__(self):
-        return len(self.X)
+        return len(self.data)
 
     def __getitem__(self, ind):
-        x_i = self.X.iloc[ind]
-        y_i = self.y.iloc[ind]
+        x_i = self.data.iloc[ind]
+        x1_i = self.data1.iloc[ind]
+        y_i = self.label.iloc[ind]
 
-        return torch.tensor(x_i), torch.tensor(y_i)
+        return torch.tensor(x_i), torch.tensor(x1_i), torch.tensor(y_i)
 
     
 def train(model, iterator, optimizer):
@@ -81,13 +85,13 @@ def train(model, iterator, optimizer):
     
     total = 0
     for batch_data in tqdm(iterator):
-        print(batch_data)
-        x_i, y_i = batch_data
-        x_i = x_i.to(device)
-        y_i = y_i.to(device)
+        x_i, x1_i, y_i = batch_data
+        x_i = x_i.to(device).float()
+        x1_i = x1_i.to(device).float()
+        y_i = y_i.to(device).float()
         optimizer.zero_grad()
         # Obtaining the logits to obtain the loss
-        predictions = model(x_i)
+        predictions = model(x_i, x1_i)
         loss = criterion(predictions, y_i)
         loss.backward()
         optimizer.step()
@@ -107,21 +111,21 @@ def evaluate(model, iterator):
     # Predicted value
     comp_pred = []
     with torch.no_grad():
-        for i, data in tqdm(iterator):
-            inp_ids = data[0][0]
-            inp_mask = data[0][1]
-            input2 = data[1].to(device)
-            target = data[2]
+        for batch_data in tqdm(iterator):
+            x_i, x1_i, y_i = batch_data
+            x_i = x_i.to(device).float()
+            x1_i = x1_i.to(device).float()
+            y_i = y_i.to(device).float()
             model.to(device)
-            inp_ids = inp_ids.to(device)
-            inp_mask = inp_mask.to(device)
-            predictions = model(input_ids=inp_ids, attention_mask=inp_mask, input2 = input2)
+            predictions = model(x_i, x1_i)
             predictions = predictions.squeeze().cpu().numpy()
             final_pred += list(predictions)
-            comp_pred += list(target)
-    return score_function(np.array(final_pred), np.array(comp_pred)), ((abs(np.array(final_pred)-np.array(comp_pred))).sum())/len(final_pred)
-
-
+            comp_pred += list(y_i.cpu().numpy())
+    final_pred = torch.tensor(final_pred)
+    comp_pred = torch.tensor(comp_pred)
+    score = score_function(final_pred, comp_pred)
+    error = ((abs(np.array(final_pred)-np.array(comp_pred))).sum())/len(final_pred)
+    return score, error
 
 def run(model, root_dir):
     '''
@@ -132,16 +136,25 @@ def run(model, root_dir):
     print("Setting up data.")
     data = pd.read_csv(f'{root_dir}/embeddings.csv')
     data1 = pd.read_csv(f'{root_dir}/mini_train.csv')
-    y = data['PRODUCT_LENGTH']
-    X = data.drop(columns = ['PRODUCT_ID','PRODUCT_LENGTH', ''])
-    print("Data shape:",X.shape)
-    print("Full scale data without clipping.")
-    x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-    print("Number of training samples:", len(x_train), len(y_train))
+    data_train, data_val, data1_train, data1_val = train_test_split(data, data1, test_size=0.2, random_state=42)
+    y_train = data1_train['PRODUCT_LENGTH']
+    y_val = data1_val['PRODUCT_LENGTH']
+    
+    # create a sample DataFrame with a categorical column containing values from 0 to 13420
+    df = pd.DataFrame({
+        'PRODUCT_TYPE_ID': range(13421),
+        'value': [i**2 for i in range(13421)]
+    })
+    encoder = OneHotEncoder(sparse=False)
+    _ = encoder.fit_transform(df[['PRODUCT_TYPE_ID']])
+    onehot_array1 = encoder.transform(pd.DataFrame(data1_train['PRODUCT_TYPE_ID']))
+    train_onehot_df = pd.DataFrame(onehot_array1, columns=encoder.get_feature_names_out(['PRODUCT_TYPE_ID']))
+    onehot_array2 = encoder.transform(pd.DataFrame(data1_val['PRODUCT_TYPE_ID']))
+    val_onehot_df = pd.DataFrame(onehot_array2, columns=encoder.get_feature_names_out(['PRODUCT_TYPE_ID']))
     # Dataloader
-    train_dataset = CustomDataset(X=x_train, y=y_train)
+    train_dataset = CustomDataset(data = data_train, data1 = train_onehot_df, label = y_train)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers = num_workers, drop_last = False)
-    val_dataset = CustomDataset(X=x_val, y=y_val)
+    val_dataset = CustomDataset(data = data_val, data1 = val_onehot_df, label = y_val)
     valid_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers = num_workers, drop_last = False)
     optimizer = Lion(model.parameters(), lr=learning_rate, weight_decay=1e-2)
     model = model.to(device)
@@ -169,14 +182,14 @@ if __name__ == "__main__":
     base_path = pathlib.Path().absolute()
 
     # Input of the required hyperparameters
-    BATCH_SIZE = 120
-    learning_rate = 1e-3
+    BATCH_SIZE = 120 *2
+    learning_rate = 1e-2
     device = 'cuda:3'
-    wandb_login = False
+    wandb_login = True
 
     SEED = 42
     num_epoch = 100
-    num_workers = 8
+    num_workers = 4
     # Path to the dataset
     root_dir = f"{base_path}/dataset"
     if not os.path.exists(root_dir):
