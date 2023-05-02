@@ -99,10 +99,9 @@ def run(model, tokenizer, root_dir):
     # Reading dataset and preprocessing it to get it in the desired format
     print("Setting up data.")
     train_data = pd.read_csv(f'{root_dir}/train.csv')
-    train_data = train_data.sample(100000)
+    # train_data = train_data.sample(100000)
     train_data = train_data.fillna("Not given")
     print("Data shape:",train_data.shape)
-    print("Full scale data with clipping.")
     train_ds = read_dataset(train_data)
     print("Number of training samples:", len(train_ds))
     # Dataloader

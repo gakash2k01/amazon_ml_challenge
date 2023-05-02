@@ -181,7 +181,7 @@ if __name__ == "__main__":
 
     # Input of the required hyperparameters
     BATCH_SIZE = 120 *2
-    learning_rate = 5e-3
+    learning_rate = 1e-1
     device = 'cuda:2'
     wandb_login = True
 
